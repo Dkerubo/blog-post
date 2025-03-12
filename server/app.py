@@ -1,12 +1,15 @@
-from flask import Flask, jsonify, make_response, request 
+from flask import Flask, jsonify, make_response, request, session
 from models import Category, User, Post
 from flask_migrate import Migrate
 from database import db 
 from flask_restful import Resource, Api
+import os 
+import bcrypt
+
 
 app = Flask(__name__)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URI')
 
 migrate = Migrate(app, db)
 
@@ -15,115 +18,147 @@ db.init_app(app)
 #create an api instance/object
 api = Api(app)
 
+#create a secret key 
+secret_key = os.urandom(23)
+app.secret_key = secret_key
+
+
 '''
-1.GET  /users 
-2. POST /users 
+POST /auth/register
 '''
-# define class for you resouce 
-class Users(Resource): 
-    #http method/verb
-    def get(self):
-        users = []
-        
-        for i in User.query.all():
-            users.append(i.to_dict())
-            
-        response_body = jsonify(users)
-        status_code = 200
-        
-        return make_response(response_body, status_code)
-    
+class Register(Resource):
     def post(self):
         
+        data = request.get_json()
+        
+        full_name = data['full_name']
+        email = data['email']
+        password = data['password']
+        
+        user = User.query.filter(User.email == email).first()
+        
+        if user:
+            response = make_response(
+                jsonify({
+                    'message': 'user already exist!'
+                }), 
+                409
+            )
+            response.headers['Content-Type'] = 'application/json'
+            return response
+        
+        #hash the password before we store it 
+        hashed_password = bcrypt.hashpw(password.encode('utf8'), bcrypt.gensalt())
+        
         new_user = User(
-            full_name = request.form.get('full_name'),
-            email = request.form.get('email')
+            full_name = full_name,
+            email = email,
+            password = hashed_password.decode('utf8')
         )
         
         db.session.add(new_user)
         db.session.commit()
         
-        response_body = {
-            'message': 'user created!'
-        }
-        status_code = 201
+        #session['user_id'] = new_user.id
         
-        return make_response(response_body, status_code)
-api.add_resource(Users, '/users')
+        response = make_response(
+            jsonify({
+                'message': 'Registration success!!'
+            }),
+            201
+        )
+        response.headers['Content-Type'] = 'application/json'
+        return response
+api.add_resource(Register, '/auth/register')
 
 '''
-GET  /users/id
-PUT/PATCH   /users/id
-DELETE  /users/id
+POST /auth/login
 '''
-
-class UserById(Resource):
-    def get(self, id):
+class Login(Resource):
+    def post(self):
+        data = request.get_json()
         
-        user = User.query.filter(User.id == id).first()
+        email = data['email']
+        password = data['password']
+        
+        user = User.query.filter(User.email == email).first()
         
         if user is None:
-            response = {
-                'message': 'User doe not exists'
-            }
-            status_code = 404
+            response = make_response(
+                jsonify({
+                    "Error": 'Unauthorized Access'
+                }), 
+                401
+            )
+            response.headers['Content-type'] = 'application/json'
+            return response
+        
+        #check the password 
+        hashed_password = user.password
+        
+        if bcrypt.checkpw(password.encode('utf8'), hashed_password.encode('utf8')):
             
-            return make_response(response, status_code)
-        
-        response = jsonify(user.to_dict())
-        status_code = 200
-        
-        return make_response(response, status_code)
-    
-    def put(self, id):
-        
-        user = User.query.filter(User.id == id).first()
-        
-        if user is None:
-            response = {
-                'message': 'User doe not exists'
-            }
-            status_code = 404
+            session['user_id'] = user.id
             
-            return make_response(response, status_code)
+            response = make_response(
+                jsonify({
+                    'message': 'login success'
+                }), 
+                200
+            )
+            return response
+        else:
+            response = make_response(
+                jsonify({
+                    'message': 'password incorrect!'
+                }),
+                403
+            )
+            return response
+api.add_resource(Login, '/auth/login')
         
-        for attr in request.form:
-            setattr(user, attr, request.form.get(attr))
+'''
+GET /posts
+'''       
+class Posts(Resource):
+    def get(self):
+        #get the user id from the session
+        user_id = session.get('user_id')
         
-        db.session.add(user)
-        db.session.commit()
+        #check if the the user_id exists 
+        if user_id is None:
+            response = make_response(
+                jsonify({
+                    'message': 'Unauthorized access'
+                }), 
+                401
+            )
+            return response
         
-        response = jsonify(user.to_dict())
-        status_code = 200
+        posts = []
         
-        return make_response(response, status_code)
+        for post in Post.query.filter(Post.user_id == user_id).all():
+            posts.append(post.to_dict())
+        
+        if len(posts) == 0:
+            response = make_response(
+                jsonify({
+                    'message': 'No posts Found'
+                }),
+                200
+            )
+            return response
+        
+        response = make_response(
+            jsonify(posts), 
+            200
+        )
+        return response
     
-    def delete(self, id):
-        # Error handling: Check if user exists
-        user = User.query.filter_by(id=id).first()
-        if user is None:
-            response = {
-                'message': 'User does not exist'
-            }
-            status_code = 404
-            return make_response(response, status_code)
-
-        # Delete user from DB
-        db.session.delete(user)
+api.add_resource(Posts, '/posts') 
         
-        # Persist changes
-        db.session.commit()
 
-        # Send a response to the user
-        response_body = {
-            'message': 'User deleted successfully'
-        }
-        status_code = 200
-        return make_response(response_body, status_code)
 
-api.add_resource(UserById, '/users/<int:id>')
 
 if __name__ == '__main__':
     app.run(port=5555, debug=True)
-
-
